@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Eye Assistant</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: sans-serif; }
+    body {
+      background: #060b14;
+      color: #e0f7fa;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: space-between;
+      height: 100vh;
+      padding: 20px;
+      overflow: hidden;
+    }
+
+    /* พื้นที่แสดงดวงตา */
+    .eye-container {
+      position: relative;
+      width: 260px;
+      height: 260px;
+      margin-top: 30px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .eye-outer {
+      width: 220px;
+      height: 220px;
+      border-radius: 50%;
+      border: 4px solid #00e5ff;
+      box-shadow: 0 0 30px rgba(0, 229, 255, 0.5), inset 0 0 25px rgba(0, 229, 255, 0.4);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.3s ease;
+      position: relative;
+      overflow: hidden;
+    }
+    .pupil {
+      width: 90px;
+      height: 90px;
+      border-radius: 50%;
+      background: radial-gradient(circle, #ffffff 10%, #00e5ff 45%, #006064 100%);
+      box-shadow: 0 0 20px #00e5ff;
+      transition: transform 0.2s ease, all 0.3s ease;
+    }
+
+    /* อารมณ์ต่างๆ ของดวงตา */
+    .eye-outer.happy {
+      border-color: #00e676;
+      box-shadow: 0 0 35px rgba(0, 230, 118, 0.7);
+      height: 140px;
+      border-radius: 110px 110px 40px 40px;
+    }
+    .eye-outer.happy .pupil {
+      background: radial-gradient(circle, #ffffff 10%, #00e676 50%, #004d40 100%);
+      box-shadow: 0 0 20px #00e676;
+    }
+    .eye-outer.alert {
+      border-color: #ff9100;
+      box-shadow: 0 0 35px rgba(255, 145, 0, 0.7);
+    }
+    .eye-outer.alert .pupil {
+      width: 115px;
+      height: 115px;
+      background: radial-gradient(circle, #ffffff 10%, #ff9100 50%, #bf360c 100%);
+    }
+
+    /* ข้อความซ้อนทับ */
+    .overlay-text {
+      position: absolute;
+      bottom: -15px;
+      background: rgba(0, 20, 35, 0.85);
+      border: 1px solid #00e5ff;
+      padding: 8px 18px;
+      border-radius: 20px;
+      font-size: 1.1rem;
+      font-weight: bold;
+      color: #ffffff;
+      text-align: center;
+      box-shadow: 0 0 15px rgba(0, 229, 255, 0.4);
+      max-width: 90vw;
+    }
+
+    /* แผงควบคุม */
+    .controls {
+      width: 100%;
+      max-width: 400px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      background: rgba(255, 255, 255, 0.05);
+      padding: 15px;
+      border-radius: 16px;
+    }
+    input, select, button {
+      padding: 12px;
+      border-radius: 10px;
+      border: 1px solid #00838f;
+      background: #0d1b2a;
+      color: #fff;
+      font-size: 1rem;
+    }
+    button {
+      background: #00acc1;
+      color: #000;
+      font-weight: bold;
+      border: none;
+      cursor: pointer;
+    }
+    button:active { opacity: 0.8; }
+    video { display: none; }
+    .status { font-size: 0.85rem; color: #80deea; text-align: center; }
+  </style>
+</head>
+<body>
+
+  <div class="eye-container">
+    <div id="eye" class="eye-outer">
+      <div id="pupil" class="pupil"></div>
+    </div>
+    <div id="overlayText" class="overlay-text">รอเปิดระบบ...</div>
+  </div>
+
+  <div class="controls">
+    <div id="status" class="status">สถานะ: ยังไม่เริ่มทำงาน</div>
+    <input type="text" id="speechInput" value="สวัสดีครับ ยินดีต้อนรับครับ" placeholder="พิมพ์ข้อความภาษาไทยที่ต้องการให้พูด..." />
+    <select id="emotionSelect">
+      <option value="happy">อารมณ์เมื่อพบคน: ดีใจ / เป็นมิตร</option>
+      <option value="alert">อารมณ์เมื่อพบคน: ตื่นตัว / สนใจ</option>
+    </select>
+    <button id="startBtn">เริ่มเปิดกล้องและระบบเสียง</button>
+  </div>
+
+  <video id="webcam" autoplay playsinline muted></video>
+
+  <script>
+    const video = document.getElementById('webcam');
+    const eye = document.getElementById('eye');
+    const pupil = document.getElementById('pupil');
+    const overlayText = document.getElementById('overlayText');
+    const statusText = document.getElementById('status');
+    const speechInput = document.getElementById('speechInput');
+    const emotionSelect = document.getElementById('emotionSelect');
+    const startBtn = document.getElementById('startBtn');
+
+    let model = null;
+    let isDetecting = false;
+    let lastSpokenTime = 0;
+    const COOLDOWN_MS = 8000; // เว้นระยะพูดซ้ำทุก 8 วินาที
+
+    // ฟังก์ชันพูดภาษาไทย
+    function speakThai(text) {
+      if (!('speechSynthesis' in window)) return;
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = 'th-TH';
+      utterance.rate = 1.0;
+      window.speechSynthesis.speak(utterance);
+    }
+
+    // เริ่มต้นระบบ (ต้องกดปุ่มบนมือถือเพื่อปลดล็อกเสียงและกล้อง)
+    startBtn.addEventListener('click', async () => {
+      startBtn.disabled = true;
+      statusText.innerText = 'กำลังโหลดโมเดลตรวจจับมนุษย์...';
+      
+      // ปลดล็อกระบบเสียงบน iOS/Android
+      speakThai('ระบบพร้อมทำงานแล้วครับ');
+
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'user' }, // ใช้กล้องหน้า
+          audio: false
+        });
+        video.srcObject = stream;
+        await new Promise(resolve => video.onloadedmetadata = resolve);
+
+        model = await cocoSsd.load();
+        statusText.innerText = 'กำลังเฝ้าระวัง...';
+        overlayText.innerText = 'กำลังสแกนพื้นที่...';
+        isDetecting = true;
+        detectLoop();
+      } catch (err) {
+        statusText.innerText = 'ไม่สามารถเปิดกล้องได้ (ต้องเปิดผ่าน HTTPS)';
+        startBtn.disabled = false;
+      }
+    });
+
+    // วนลูปตรวจจับมนุษย์
+    async function detectLoop() {
+      if (!isDetecting) return;
+
+      const predictions = await model.detect(video);
+      const person = predictions.find(p => p.class === 'person' && p.score > 0.6);
+
+      if (person) {
+        // เปลี่ยนอารมณ์ดวงตา
+        eye.className = 'eye-outer ' + emotionSelect.value;
+
+        // ขยับตาดำตามตำแหน่งคน (ซ้าย-ขวา)
+        const centerX = person.bbox[0] + person.bbox[2] / 2;
+        const videoWidth = video.videoWidth || 640;
+        const offsetX = ((videoWidth / 2 - centerX) / videoWidth) * 50;
+        pupil.style.transform = `translateX(${offsetX}px)`;
+
+        // ซ้อนข้อความและพูดเมื่อครบระยะเวลา Cooldown
+        const message = speechInput.value.trim() || 'ตรวจพบมนุษย์';
+        overlayText.innerText = message;
+
+        const now = Date.now();
+        if (now - lastSpokenTime > COOLDOWN_MS) {
+          speakThai(message);
+          lastSpokenTime = now;
+        }
+      } else {
+        // กลับสู่สถานะปกติ
+        eye.className = 'eye-outer';
+        pupil.style.transform = 'translate(0, 0)';
+        overlayText.innerText = 'ไม่พบบุคคล';
+      }
+
+      requestAnimationFrame(detectLoop);
+    }
+  </script>
+</body>
+</html>
